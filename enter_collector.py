@@ -117,8 +117,8 @@ CHANNEL = _get("twitch", "channel", "", required=True).lower().lstrip("#")
 BROADCASTER_ID = _get("twitch", "broadcaster_id", "")
 
 SECTION = "enter_collector"
-file_path = _resolve(_get(SECTION, "output_file", "entries.txt"))
-ignore_path = _resolve(_get(SECTION, "ignore_file", "ignored.txt"))
+file_path = _resolve(_get(SECTION, "output_file", "enter_collector_entries.txt"))
+ignore_path = _resolve(_get(SECTION, "ignore_file", "enter_collector_ignored.txt"))
 state_path = _resolve(_get(SECTION, "state_file", "enter_collector_state.txt"))
 CHECK_FOLLOWERS = _get(SECTION, "check_followers", True, bool)
 MAX_COUNT = _get(SECTION, "max_count", 100, int)
@@ -408,7 +408,7 @@ class Bot(commands.Bot):
         if cmd == "!help":
             status = "OPEN" if self.is_open else "CLOSED"
             await send(
-                f"🤖 Status: {status} | Commands: !close, !open, !reset, !remove <name>, "
+                f"🤖 Status: {status} | Commands: !enter, !open, !close, !reset, !remove <name>, "
                 f"!count, !ignore <name>, !unignore <name> | {self.slots_left()} slots open"
             )
 
