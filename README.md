@@ -39,8 +39,8 @@ If `settings.ini` is missing, the script creates a template and exits. If a valu
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `output_file` | `entries.txt` | The entry list, one line per entry |
-| `ignore_file` | `ignored.txt` | Users the bot ignores (managed with `!ignore` / `!unignore`) |
+| `output_file` | `enter_collector_entries.txt` | The entry list, one line per entry |
+| `ignore_file` | `enter_collector_ignored.txt` | Users the bot ignores (managed with `!ignore` / `!unignore`) |
 | `state_file` | `enter_collector_state.txt` | Remembers whether entries were open or closed |
 | `check_followers` | `true` | Only followers, subscribers, VIPs and mods can enter |
 | `max_count` | `100` | Maximum **total** entries (hard cap) |
@@ -94,9 +94,9 @@ The bot answers the same user at most once per `user_cooldown` seconds per comma
 | File | Purpose |
 | --- | --- |
 | `settings.ini` | Your settings (private, not committed) |
-| entries file | The list of entries. Open it to copy names into your wheel |
-| ignored file | Ignored users |
-| state file | Open/closed status |
+| enter_collector_entries file | The list of entries. Open it to copy names into your wheel |
+| enter_collector_ignored file | Ignored users |
+| enter_collector_state file | Open/closed status |
 
 These runtime files are listed in `.gitignore`. If any of them were committed before being ignored, run `git rm --cached <file>` once to stop tracking them.
 
