@@ -1,4 +1,5 @@
-import asyncio
+import configparser
+import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -8,30 +9,150 @@ import aiohttp
 from twitchio.ext import commands
 
 # pip install twitchio==2.10.0
-# use https://twitchtokengenerator.com to get the Access Token and the Client ID that belongs to it with new token scopes: chat:read, chat:edit, moderator:read:followers
-# use https://www.streamweasels.com/tools/convert-twitch-username-to-user-id/ for Broadcaster ID (only needed if CHECK_FOLLOWERS = True)
-# NOTE: for the follower check, the account that owns the token must be the broadcaster OR a moderator of the channel.
+# All settings (token, client ID, channel, limits, file names...) live in settings.ini.
+# If settings.ini doesn't exist yet, this script creates one for you to fill in.
+# For the follower check, the account that owns the token must be a moderator of the channel (or the broadcaster).
 
-# ========== FILL THESE IN ==========
-TOKEN = "oauth:xxxxxxxxxxxxxxxxxxxxxxx"          # Your OAuth token (see below)
-CLIENT_ID = "xxxxxxxxxxxxxxxxxxxxxxx"                       # From Twitch Developer Console
-CHANNEL = "untouchablecru"                    # lowercase, no #
-NICK = "Insider46_og"                           # your account name (lowercase)
-OUTPUT_FILE = "entries.txt"                             # the list file (one line per entry; a subscriber's 2 entries = their name twice)
-IGNORE_FILE = "ignored.txt"                             # users the bot will ignore (managed with !ignore / !unignore)
-CHECK_FOLLOWERS = True                                  # True = only followers (or subscribers/VIPs/mods/broadcaster) can enter
-BROADCASTER_ID = "xxxxxxxx"                            # numeric ID of the channel (see below)
-MAX_COUNT = 100                               # ← Maximum number of TOTAL entries (a subscriber's 2nd entry uses a slot too)
-ENTRIES_PER_USER = 1                          # entries allowed per normal user
-SUBSCRIBER_ENTRIES = 2                        # entries allowed per subscriber (they must type !enter once per entry)
-START_OPEN = True                             # True = entries are open when the bot starts, False = closed until a mod types !open
-USER_COOLDOWN = 30                            # seconds before the bot answers the same user again for the same command
-GLOBAL_COOLDOWN = 5                           # seconds between ANY two bot answers of the same kind (flood protection)
-# ===================================
+SCRIPT_DIR = Path(__file__).resolve().parent
+SETTINGS_NAME = "settings.ini"
+
+SETTINGS_TEMPLATE = """\
+# Shared settings file.
+# Every script in this folder (or the folder above it) that reads settings.ini uses the [twitch]
+# section, so your token and IDs only ever need updating in one place.
+# KEEP THIS FILE PRIVATE: it contains your token. Do not upload it to GitHub (add it to .gitignore).
+# On GitHub, keep only settings.example.ini (placeholders) and copy it to settings.ini locally.
+#
+# Token + Client ID: https://twitchtokengenerator.com
+#   Log in as the bot account and request these scopes: chat:read, chat:edit, moderator:read:followers
+#   (the bot account must be a moderator of the channel for the follower check to work).
+# Broadcaster ID: https://www.streamweasels.com/tools/convert-twitch-username-to-user-id/
+#
+# Lines starting with # are comments. Changes take effect the next time a script is started.
+
+[twitch]
+# Access token from twitchtokengenerator.com (with or without the "oauth:" prefix)
+token = oauth:xxxxxxxxxxxxxxxxxxxxxxx
+# The Client ID that belongs to that token
+client_id = xxxxxxxxxxxxxxxxxxxxxxx
+# The bot account's name (lowercase)
+nick = insider46_og
+# The channel to watch (lowercase, no #)
+channel = untouchablecru
+# Numeric ID of the channel (only needed when check_followers = true)
+broadcaster_id = xxxxxxxx
+
+[enter_collector]
+# List of entries (one line per entry; a subscriber's two entries = their name on two lines)
+output_file = entries.txt
+# Users the bot ignores (managed in chat with !ignore / !unignore)
+ignore_file = ignored.txt
+# Remembers whether entries were open or closed between runs (written by the bot)
+state_file = enter_collector_state.txt
+# true = only followers, subscribers, VIPs and mods can enter
+check_followers = true
+# Maximum TOTAL entries (a subscriber's second entry uses a slot too)
+max_count = 100
+# Entries allowed per normal user
+entries_per_user = 1
+# Entries allowed per subscriber (they must type !enter once per entry)
+subscriber_entries = 2
+# Used only the first time, before enter_collector_state.txt exists: start with entries open?
+start_open = true
+# Flood protection: seconds before the bot answers the same user again for the same command
+user_cooldown = 30
+# Flood protection: seconds between any two bot answers of the same kind
+global_cooldown = 5
+"""
+
+
+# ---------------------------------------------------------------- settings
+def load_settings():
+    """Read settings.ini (next to this script, or one folder up). Create a template if there isn't one."""
+    path = next((p for p in (SCRIPT_DIR / SETTINGS_NAME, SCRIPT_DIR.parent / SETTINGS_NAME) if p.exists()), None)
+    if path is None:
+        path = SCRIPT_DIR / SETTINGS_NAME
+        path.write_text(SETTINGS_TEMPLATE, encoding="utf-8")
+        sys.exit(
+            f"No {SETTINGS_NAME} found, so I created one here:\n  {path}\n"
+            f"Open it, fill in your Twitch details, then run this script again."
+        )
+
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.read(path, encoding="utf-8")
+    return cfg, path
+
+
+cfg, SETTINGS_PATH = load_settings()
+_problems = []
+
+
+def _get(section: str, key: str, default=None, kind=str, required=False):
+    """Read one setting, collecting problems so they can all be reported at once."""
+    if not cfg.has_option(section, key):
+        if required:
+            _problems.append(f"[{section}] {key} is missing")
+        return default
+    try:
+        if kind is bool:
+            return cfg.getboolean(section, key)
+        if kind is int:
+            return cfg.getint(section, key)
+        return cfg.get(section, key).strip()
+    except ValueError:
+        _problems.append(f"[{section}] {key} has an invalid value: {cfg.get(section, key)!r}")
+        return default
+
+
+def _resolve(name: str) -> Path:
+    """File names in settings.ini are relative to this script's folder (absolute paths also work)."""
+    p = Path(name)
+    return p if p.is_absolute() else SCRIPT_DIR / p
+
+
+TOKEN = _get("twitch", "token", "", required=True)
+CLIENT_ID = _get("twitch", "client_id", "", required=True)
+NICK = _get("twitch", "nick", "", required=True).lower()
+CHANNEL = _get("twitch", "channel", "", required=True).lower().lstrip("#")
+BROADCASTER_ID = _get("twitch", "broadcaster_id", "")
+
+SECTION = "enter_collector"
+file_path = _resolve(_get(SECTION, "output_file", "entries.txt"))
+ignore_path = _resolve(_get(SECTION, "ignore_file", "ignored.txt"))
+state_path = _resolve(_get(SECTION, "state_file", "enter_collector_state.txt"))
+CHECK_FOLLOWERS = _get(SECTION, "check_followers", True, bool)
+MAX_COUNT = _get(SECTION, "max_count", 100, int)
+ENTRIES_PER_USER = _get(SECTION, "entries_per_user", 1, int)
+SUBSCRIBER_ENTRIES = _get(SECTION, "subscriber_entries", 2, int)
+START_OPEN = _get(SECTION, "start_open", True, bool)
+USER_COOLDOWN = _get(SECTION, "user_cooldown", 30, int)
+GLOBAL_COOLDOWN = _get(SECTION, "global_cooldown", 5, int)
+
+# Catch placeholders and obviously bad values before connecting
+for _label, _value in (("token", TOKEN), ("client_id", CLIENT_ID)):
+    if "xxxx" in _value.lower():
+        _problems.append(f"[twitch] {_label} still has the placeholder value")
+if CHECK_FOLLOWERS and (not BROADCASTER_ID or "xxxx" in BROADCASTER_ID.lower()):
+    _problems.append("[twitch] broadcaster_id must be filled in when check_followers = true")
+if MAX_COUNT < 1:
+    _problems.append("[enter_collector] max_count must be at least 1")
+if ENTRIES_PER_USER < 1 or SUBSCRIBER_ENTRIES < 1:
+    _problems.append("[enter_collector] entries_per_user and subscriber_entries must be at least 1")
+if USER_COOLDOWN < 0 or GLOBAL_COOLDOWN < 0:
+    _problems.append("[enter_collector] cooldowns can't be negative")
+
+if _problems:
+    sys.exit(
+        f"Please fix these in {SETTINGS_PATH}:\n  - " + "\n  - ".join(_problems)
+    )
+
+if not TOKEN.startswith("oauth:"):
+    TOKEN = "oauth:" + TOKEN
 
 MOD_COMMANDS = {"!open", "!close", "!reset", "!remove", "!count", "!ignore", "!unignore", "!help"}
 
 
+# ---------------------------------------------------------------- files
 def load_list(path: Path) -> list:
     """Load lowercase names from a text file, one per line. Duplicates are kept (they are extra entries)."""
     names = []
@@ -51,6 +172,29 @@ def save_list(path: Path, names) -> None:
             f.write(name + "\n")
 
 
+def load_state(default: bool):
+    """Return (is_open, where_it_came_from). The state file is a single line: is_open=true / is_open=false."""
+    try:
+        if state_path.exists():
+            for line in state_path.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "is_open":
+                    return value.strip().lower() in ("1", "true", "yes", "on", "open"), state_path.name
+    except OSError as e:
+        print(f"Couldn't read {state_path.name}: {e}")
+    return default, "settings.ini (start_open)"
+
+
+def save_state(is_open: bool) -> None:
+    """Write the open/closed state (write to a temp file first so a crash can't leave a half-written file)."""
+    try:
+        tmp = state_path.with_name(state_path.name + ".tmp")
+        tmp.write_text(f"is_open={'true' if is_open else 'false'}\n", encoding="utf-8")
+        tmp.replace(state_path)
+    except OSError as e:
+        print(f"Couldn't save {state_path.name}: {e}")
+
+
 def clean_name(raw: str) -> str:
     """'@SomeName' -> 'somename'"""
     return raw.strip().lstrip("@").lower()
@@ -68,16 +212,14 @@ def is_subscriber(author) -> bool:
 
 
 # In-memory state. `entries` is every entry in order; `counts` is entries per user.
-file_path = Path(OUTPUT_FILE)
-ignore_path = Path(IGNORE_FILE)
 entries = load_list(file_path)
 counts = Counter(entries)
 ignored = dict.fromkeys(load_list(ignore_path))
 
 if entries:
-    print(f"Loaded {len(entries)} existing entries ({len(counts)} people) from {OUTPUT_FILE}")
+    print(f"Loaded {len(entries)} existing entries ({len(counts)} people) from {file_path.name}")
 if ignored:
-    print(f"Loaded {len(ignored)} ignored users from {IGNORE_FILE}")
+    print(f"Loaded {len(ignored)} ignored users from {ignore_path.name}")
 
 
 class Bot(commands.Bot):
@@ -89,7 +231,7 @@ class Bot(commands.Bot):
             prefix="!",
             initial_channels=[CHANNEL]
         )
-        self.is_open = START_OPEN
+        self.is_open, self._state_source = load_state(START_OPEN)
         self._last_user_reply = {}    # (user, key) -> time of last reply
         self._last_global_reply = {}  # key -> time of last reply
         self._pending = set()         # users whose follower check is currently running
@@ -115,9 +257,10 @@ class Bot(commands.Bot):
     async def event_ready(self):
         state = "OPEN" if self.is_open else "CLOSED"
         print(f"Connected as {self.nick} | Watching #{CHANNEL} for !enter")
-        print(f"Entries will be written to: {file_path.absolute()}")
+        print(f"Settings: {SETTINGS_PATH}")
+        print(f"Entries will be written to: {file_path}")
         print(f"Max entries: {MAX_COUNT} | Per user: {ENTRIES_PER_USER} | Subscribers: {SUBSCRIBER_ENTRIES}")
-        print(f"Entries are {state} | Follower check: {'ON' if CHECK_FOLLOWERS else 'OFF'}")
+        print(f"Entries are {state} (from {self._state_source}) | Follower check: {'ON' if CHECK_FOLLOWERS else 'OFF'}")
         if CHECK_FOLLOWERS:
             await self.verify_follower_access()
         print("Press Ctrl+C to stop.\n")
@@ -193,6 +336,13 @@ class Bot(commands.Bot):
         return False
 
     async def handle_enter(self, message, user: str, display: str):
+        author = message.author
+
+        # The broadcaster runs the giveaway and doesn't enter it (add them to entries.txt by hand if needed)
+        if author.is_broadcaster:
+            print(f"[BROADCASTER] {user} typed !enter (broadcaster entries are not accepted)")
+            return
+
         # Entries closed?
         if not self.is_open:
             if self.can_reply(user, "closed"):
@@ -200,7 +350,7 @@ class Bot(commands.Bot):
             print(f"[CLOSED] {user} tried to enter")
             return
 
-        author = message.author
+        # Only subscribers get the extra entry(ies); being a VIP or mod alone isn't enough
         sub = is_subscriber(author)
         limit = SUBSCRIBER_ENTRIES if sub else ENTRIES_PER_USER
 
@@ -211,8 +361,8 @@ class Bot(commands.Bot):
         if await self.blocked(message, user, display, limit):
             return
 
-        # Follower check (subscribers, VIPs, mods and the broadcaster are "above" follower, so they skip it)
-        if CHECK_FOLLOWERS and not (sub or is_privileged(author) or author.is_vip):
+        # Follower check (subscribers, VIPs and mods count as "followers or above", so they skip it)
+        if CHECK_FOLLOWERS and not (sub or author.is_mod or author.is_vip):
             self._pending.add(user)
             try:
                 result = await self.is_follower(author.id)
@@ -267,6 +417,7 @@ class Bot(commands.Bot):
                 await send("🤖 Entries are already closed.")
                 return
             self.is_open = False
+            save_state(self.is_open)
             await send(f"🤖 Entries are now CLOSED. {len(entries)} entries.")
             print(f"[MOD] {user} closed entries")
 
@@ -275,6 +426,7 @@ class Bot(commands.Bot):
                 await send("🤖 Entries are already open.")
                 return
             self.is_open = True
+            save_state(self.is_open)
             await send(f"🤖 Entries are now OPEN! {self.slots_left()} slots left. Type !enter to join!")
             print(f"[MOD] {user} opened entries")
 
@@ -324,7 +476,7 @@ class Bot(commands.Bot):
                 await send("🤖 Usage: !ignore <name>")
                 return
             name = clean_name(args[0])
-            if name in (user, NICK.lower()):
+            if name in (user, NICK):
                 await send("🤖 I can't ignore that user.")
                 return
             if name in ignored:
