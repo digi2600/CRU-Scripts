@@ -4,3 +4,4 @@ live_enter_collector.py
 settings.ini
 enter_collector_entries.txt
 enter_collector_state.txt
+enter_collector_ignored.txt
